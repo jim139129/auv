@@ -238,7 +238,7 @@ mod native {
       return Ok(Arc::clone(ctx));
     }
 
-    crate::desktop::ensure_input_desktop();
+    crate::desktop::try_ensure_input_desktop().map_err(|error| backend(format!("input desktop attachment failed: {error}")))?;
     keep_mta_alive()?;
 
     // Do not reset while holding D3D_CONTEXT.write(): device creation failures can
@@ -985,7 +985,9 @@ mod native {
       key: key.clone(),
       worker_generation,
     };
-    crate::desktop::ensure_input_desktop();
+    if crate::desktop::try_ensure_input_desktop().is_err() {
+      return;
+    }
     let hwnd = HWND(key.hwnd as _);
     let item = match item_for_window(hwnd) {
       Ok(it) => it,
