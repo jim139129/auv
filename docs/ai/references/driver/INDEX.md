@@ -104,6 +104,8 @@ Count: **81**
 - [`2026-10-20-windows-screen-clicktext.md`](2026-10-20-windows-screen-clicktext.md): Windows local screen OCR click, foreground boundary and owned-receiver evidence.
 
 
+- [`2026-10-26-windows-operation-preflight.md`](2026-10-26-windows-operation-preflight.md): Explicit step admission, declared gate thresholds, title changes, timeout limits, and executor test evidence.
+
 ## Related
 
 - Parent index: [`../INDEX.md`](../INDEX.md)
