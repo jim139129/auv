@@ -168,3 +168,107 @@ fn damaged_profile_store_is_not_rewritten() {
   assert!(matches!(error, ProfileError::Decode { .. }));
   assert_eq!(std::fs::read(path).unwrap(), b"damaged");
 }
+
+#[test]
+fn profile_rejects_malformed_credentials_on_create_update_upsert() {
+  let directory = tempfile::tempdir().unwrap();
+  let path = directory.path().join("profiles.json");
+  let store = ProfileStore::from_path(&path);
+
+  store
+    .create(
+      "existing",
+      DeviceProfileInput {
+        device_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        device_name: "Existing".into(),
+        endpoint: "http://localhost:9847".into(),
+        device_credential: "initial-valid-secret".into(),
+      },
+    )
+    .unwrap();
+
+  for malformed in [
+    "bearer token with spaces",
+    "token\nnewline",
+    "token\rreturn",
+    "token\0null",
+    "token\tspace",
+    "token-\u{1f600}-emoji",
+    "token-\u{4e2d}\u{6587}-chinese",
+  ] {
+    let input = DeviceProfileInput {
+      device_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+      device_name: "Test".into(),
+      endpoint: "http://localhost:9847".into(),
+      device_credential: malformed.into(),
+    };
+    let err = store.create("new_profile", input.clone()).unwrap_err();
+    assert!(matches!(err, ProfileError::InvalidCredential));
+    let err = store.update("existing", input.clone()).unwrap_err();
+    assert!(matches!(err, ProfileError::InvalidCredential));
+    let err = store.upsert("existing", input).unwrap_err();
+    assert!(matches!(err, ProfileError::InvalidCredential));
+  }
+
+  let input_empty = DeviceProfileInput {
+    device_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+    device_name: "Test".into(),
+    endpoint: "http://localhost:9847".into(),
+    device_credential: "   ".into(),
+  };
+  let err = store.create("new_empty", input_empty.clone()).unwrap_err();
+  assert!(matches!(err, ProfileError::EmptyField("device_credential")));
+  let err = store.update("existing", input_empty).unwrap_err();
+  assert!(matches!(err, ProfileError::EmptyField("device_credential")));
+}
+
+#[test]
+fn mixed_valid_and_malformed_profiles_allow_listing_but_reject_resolving_malformed() {
+  let directory = tempfile::tempdir().unwrap();
+  let path = directory.path().join("profiles.json");
+  std::fs::write(
+    &path,
+    br#"{"profiles":{
+      "valid":{"device_id":"1111111111111111111111111111111111111111111111111111111111111111","device_name":"ValidStudio","endpoint":"http://localhost:9847","device_credential":"valid_secret_token"},
+      "corrupted":{"device_id":"2222222222222222222222222222222222222222222222222222222222222222","device_name":"CorruptedStudio","endpoint":"http://localhost:9848","device_credential":"invalid credential with spaces"}
+    }}"#,
+  )
+  .unwrap();
+
+  let store = ProfileStore::from_path(&path);
+
+  // Listing devices succeeds even with a malformed credential in one profile,
+  // returning non-secret metadata summaries for all configured devices.
+  let devices = store.list_devices().unwrap();
+  assert_eq!(devices.len(), 2);
+  let valid_device = devices.iter().find(|d| d.config_profile == "valid").unwrap();
+  assert_eq!(valid_device.device_name, "ValidStudio");
+  let corrupted_device = devices.iter().find(|d| d.config_profile == "corrupted").unwrap();
+  assert_eq!(corrupted_device.device_name, "CorruptedStudio");
+
+  // Getting a valid device by name succeeds.
+  let got_valid = store.get_device("valid").unwrap();
+  assert_eq!(got_valid.device_id, "1111111111111111111111111111111111111111111111111111111111111111");
+
+  // Getting the corrupted device metadata also succeeds.
+  let got_corrupted = store.get_device("corrupted").unwrap();
+  assert_eq!(got_corrupted.device_id, "2222222222222222222222222222222222222222222222222222222222222222");
+
+  // Resolving the valid profile succeeds and yields the bearer token.
+  let resolved_valid = store
+    .resolve(&AuvContext {
+      config_profile: Some("valid".to_string()),
+      ..Default::default()
+    })
+    .unwrap();
+  assert_eq!(resolved_valid.device_credential, "valid_secret_token");
+
+  // Resolving the corrupted profile fails closed with typed InvalidCredential and does not dial.
+  let resolve_err = store
+    .resolve(&AuvContext {
+      config_profile: Some("corrupted".to_string()),
+      ..Default::default()
+    })
+    .unwrap_err();
+  assert!(matches!(resolve_err, ProfileError::InvalidCredential));
+}
